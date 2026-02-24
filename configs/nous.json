@@ -1,0 +1,51 @@
+{
+  "name": "nous",
+  "matrix": {
+    "homeserver": "$MATRIX_HOMESERVER",
+    "user_id": "$MATRIX_BOT_USER",
+    "password": "$MATRIX_BOT_PASSWORD",
+    "server_name": "$MATRIX_SERVER_NAME",
+    "allowed_users": ["$ALLOWED_USERS"],
+    "data_dir": "/data"
+  },
+  "llm": {
+    "deep": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-20250514",
+      "api_key": "$ANTHROPIC_API_KEY",
+      "context_window": 200000,
+      "max_output": 16384,
+      "temperature": 0.7
+    },
+    "fast": {
+      "provider": "kimi",
+      "model": "k2p5",
+      "api_key": "$KIMI_API_KEY",
+      "base_url": "https://api.kimi.com/coding",
+      "context_window": 256000,
+      "max_output": 8192,
+      "temperature": 0.7
+    }
+  },
+  "auth_json_path": "$OPENCODE_AUTH_JSON",
+  "opencode": {
+    "api_url": "$OPENCODE_API_URL",
+    "username": "opencode",
+    "password": "$OPENCODE_SERVER_PASSWORD"
+  },
+  "embeddings": {
+    "enabled": true,
+    "postgres_url": "$NOUS_PG_URL",
+    "tei_url": "$NOUS_TEI_URL",
+    "sync_interval": "30s",
+    "batch_size": 32
+  },
+  "dream": {
+    "interval": "6h"
+  },
+  "workspace": {
+    "enabled": true,
+    "socket_path": "/tmp/nous.sock"
+  },
+  "projects": []
+}

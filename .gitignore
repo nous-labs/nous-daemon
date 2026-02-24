@@ -1,0 +1,13 @@
+# Compiled binaries
+/nous
+/nous-new
+/nous-*
+/bin/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
