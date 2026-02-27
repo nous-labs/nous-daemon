@@ -352,8 +352,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		slog.Info("brain bootstrapped", "context_len", len(bootstrap))
 	}
 
-	// Capture startup event
-	d.brain.Capture("observation", "nous-daemon", "Nous daemon started", "startup,daemon", "nous-daemon")
+
 
 	// Start health endpoint in background
 	go d.serveHealth(ctx)
@@ -429,8 +428,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.embedStore.Close()
 	}
 	d.embedMu.RUnlock()
-	// Capture shutdown event
-	d.brain.Capture("observation", "nous-daemon", "Nous daemon stopped gracefully", "shutdown,daemon", "nous-daemon")
+
 
 	slog.Info("nous daemon shutting down")
 	return nil
