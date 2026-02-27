@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -19,9 +20,11 @@ import (
 
 const (
 	maxToolTurns         = 5
-	maxToolLoopDuration  = 60 * time.Second
+	maxToolLoopDuration  = 5 * time.Minute
 	maxSingleToolTimeout = 10 * time.Second
 	maxWebFetchBytes     = 10 * 1024
+	proxySocketPath      = "/var/lib/nousctl/nous-proxy.sock"
+	proxyExecTimeout     = 5 * time.Minute
 )
 
 var chatToolHTTPClient = &http.Client{
@@ -48,6 +51,7 @@ type ToolExecutor interface {
 type daemonToolExecutor struct {
 	definition llm.ToolDefinition
 	run        func(ctx context.Context, input map[string]any, userPrompt string) (string, error)
+	timeout    time.Duration // 0 means use default maxSingleToolTimeout
 }
 
 func (e daemonToolExecutor) Definition() llm.ToolDefinition {
@@ -132,6 +136,24 @@ func (d *Daemon) chatToolExecutors() []ToolExecutor {
 			},
 			run: d.toolBrainCapture,
 		},
+		daemonToolExecutor{
+			definition: llm.ToolDefinition{
+				Name:        "proxy_exec",
+				Description: "Execute a whitelisted command on a host project via nous-proxy. Use for docker, git, build operations. Examples: docker compose up -d --build api, git status, ollama list.",
+				InputSchema: map[string]interface{}{
+					"project": map[string]interface{}{
+						"type":        "string",
+						"description": "Project name (e.g. sona-mp, omo-config)",
+					},
+					"command": map[string]interface{}{
+						"type":        "string",
+						"description": "Space-separated command (e.g. 'docker compose up -d --build api')",
+					},
+				},
+			},
+			run:     d.toolProxyExec,
+			timeout: proxyExecTimeout,
+		},
 	}
 }
 
@@ -146,7 +168,11 @@ func (d *Daemon) executeToolCall(ctx context.Context, byName map[string]ToolExec
 		return result
 	}
 
-	toolCtx, cancel := context.WithTimeout(ctx, maxSingleToolTimeout)
+	timeout := maxSingleToolTimeout
+	if dte, ok := executor.(daemonToolExecutor); ok && dte.timeout > 0 {
+		timeout = dte.timeout
+	}
+	toolCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	content, err := executor.Execute(toolCtx, call.Input, userPrompt)
@@ -492,4 +518,114 @@ func (d *Daemon) runToolLoop(ctx context.Context, tier llm.Tier, req llm.Complet
 	}
 
 	return "", fmt.Errorf("tool loop exceeded %d turns", maxToolTurns)
+}
+
+// --- Nous Proxy (host command execution) ---
+
+// proxyExec executes a command on the host via nous-proxy Unix socket.
+// Used by both the /exec Matrix command and the proxy_exec chat tool.
+func (d *Daemon) proxyExec(ctx context.Context, project string, command []string, cwd string) (string, error) {
+	reqBody := map[string]interface{}{
+		"project": project,
+		"command": command,
+	}
+	if cwd != "" {
+		reqBody["cwd"] = cwd
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("marshal request: %w", err)
+	}
+
+	// HTTP client over Unix socket
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+				return net.DialTimeout("unix", proxySocketPath, 5*time.Second)
+			},
+		},
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://proxy/v1/exec", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("proxy request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 50*1024)) // 50KB limit
+	if err != nil {
+		return "", fmt.Errorf("read response: %w", err)
+	}
+
+	var result struct {
+		Status     string `json:"status"`
+		ReturnCode int    `json:"returncode"`
+		Stdout     string `json:"stdout"`
+		Stderr     string `json:"stderr"`
+		Error      string `json:"error"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("parse response: %w", err)
+	}
+
+	if result.Error != "" {
+		return "", fmt.Errorf("proxy: %s", result.Error)
+	}
+
+	// Format output
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Project: %s\nCommand: %s\nExit: %d\n",
+		project, strings.Join(command, " "), result.ReturnCode))
+	if result.Stdout != "" {
+		stdout := result.Stdout
+		if len(stdout) > 5000 {
+			stdout = stdout[:5000] + "\n[truncated]"
+		}
+		sb.WriteString("\n")
+		sb.WriteString(stdout)
+	}
+	if result.Stderr != "" {
+		stderr := result.Stderr
+		if len(stderr) > 2000 {
+			stderr = stderr[:2000] + "\n[truncated]"
+		}
+		if result.ReturnCode != 0 {
+			sb.WriteString("\n--- stderr ---\n")
+		}
+		sb.WriteString(stderr)
+	}
+	return sb.String(), nil
+}
+
+// toolProxyExec is the chat tool wrapper for proxyExec.
+func (d *Daemon) toolProxyExec(ctx context.Context, input map[string]any, _ string) (string, error) {
+	project, _ := input["project"].(string)
+	if project == "" {
+		return "", fmt.Errorf("missing required parameter: project")
+	}
+
+	var command []string
+	switch v := input["command"].(type) {
+	case []interface{}:
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				command = append(command, s)
+			}
+		}
+	case string:
+		command = strings.Fields(v)
+	}
+	if len(command) == 0 {
+		return "", fmt.Errorf("missing required parameter: command")
+	}
+
+	cwd, _ := input["cwd"].(string)
+	return d.proxyExec(ctx, project, command, cwd)
 }

@@ -642,6 +642,8 @@ func (d *Daemon) processMessage(ctx context.Context, msg channel.Message) (strin
 
 	if strings.HasPrefix(msg.Content, "/dispatch") {
 		return d.handleDispatch(ctx, msg)
+	} else if strings.HasPrefix(msg.Content, "/exec") {
+		return d.handleExec(ctx, msg)
 	} else if strings.HasPrefix(msg.Content, "/oc ") {
 		msg.Content = strings.TrimPrefix(msg.Content, "/oc ")
 		if d.opencode != nil {
@@ -658,6 +660,9 @@ func (d *Daemon) processMessage(ctx context.Context, msg channel.Message) (strin
 		} else if d.hasDirectLLM {
 			response, err = d.handleDirectLLM(ctx, msg)
 		}
+	} else if d.hasDirectLLM && isInfraRequest(msg.Content) {
+		route = "direct-llm (infra)"
+		response, err = d.handleDirectLLM(ctx, msg)
 	} else if d.opencode != nil && isCodingRequest(msg.Content) {
 		route = "opencode (coding)"
 		response, err = d.handleViaOpenCode(ctx, msg)
@@ -891,6 +896,49 @@ func (d *Daemon) handleDispatch(ctx context.Context, msg channel.Message) (strin
 	return response, fmt.Sprintf("dispatch:%s", project), nil
 }
 
+// handleExec processes /exec commands for direct host command execution.
+// Routing:
+//
+//	/exec (or /exec help) → usage
+//	/exec <project> <command...> → execute via nous-proxy
+func (d *Daemon) handleExec(ctx context.Context, msg channel.Message) (string, string, error) {
+	content := strings.TrimPrefix(msg.Content, "/exec")
+	content = strings.TrimSpace(content)
+
+	if content == "" || content == "help" {
+		return "Usage: /exec <project> <command...>\nExample: /exec sona-mp docker compose up -d --build api", "exec", nil
+	}
+
+	parts := strings.SplitN(content, " ", 2)
+	if len(parts) < 2 {
+		return "Usage: /exec <project> <command...>", "exec", nil
+	}
+
+	project := parts[0]
+	cmdStr := parts[1]
+	command := strings.Fields(cmdStr)
+
+	// Send intermediate message
+	if msg.Source == "matrix" {
+		d.matrix.Send(ctx, channel.Response{
+			RoomID:  msg.RoomID,
+			Content: fmt.Sprintf("⚙️ Running on %s: %s", project, cmdStr),
+		})
+	}
+	d.events.Publish(coredaemon.Event{Type: coredaemon.EventStatus, Message: fmt.Sprintf("exec %s: %s", project, cmdStr)})
+
+	// Use a generous timeout for host commands (docker builds etc)
+	execCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	result, err := d.proxyExec(execCtx, project, command, "")
+	if err != nil {
+		return fmt.Sprintf("❌ Failed: %v", err), "exec", nil
+	}
+
+	return result, fmt.Sprintf("exec:%s", project), nil
+}
+
 // --- Conversation History ---
 
 // appendHistory adds a message to a room's conversation history.
@@ -986,6 +1034,24 @@ func isComplexQuery(s string) bool {
 		"strategy", "approach", "recommend", "evaluate", "review",
 	}
 	for _, signal := range complexSignals {
+		if strings.Contains(s, signal) {
+			return true
+		}
+	}
+	return false
+}
+
+// isInfraRequest detects messages about infrastructure/ops that should use
+// the direct LLM with proxy_exec tool instead of being routed to OpenCode.
+func isInfraRequest(s string) bool {
+	s = strings.ToLower(s)
+	infraSignals := []string{
+		"rebuild", "restart", "docker", "container",
+		"compose up", "compose down", "compose build",
+		"systemctl", "proxy", "ollama",
+		"smp-", "sona-mp", "omo-config",
+	}
+	for _, signal := range infraSignals {
 		if strings.Contains(s, signal) {
 			return true
 		}
