@@ -101,9 +101,13 @@ Environment variables in config values (prefixed with `$`) are resolved at load 
 | `NOUS_CONFIG_PATH` | — | Config file path |
 | `NOUS_PRIVATE_CONFIG` | — | Private config overlay (secrets) |
 | `NOUS_HTTP_ADDR` | `:8080` | HTTP listen address |
+| `NOUS_WORKSPACE_ENABLED` | `1` | Enable workspace API |
 | `NOUS_WORKSPACE_SOCKET` | `/tmp/nous.sock` | Unix socket for workspace API |
+| `NOUS_WORKSPACE_TCP` | `:8090` | TCP address for workspace API |
+| `NOUS_EMBEDDINGS_ENABLED` | — | Set to enable embeddings module |
 | `NOUS_PG_URL` | — | PostgreSQL connection URL (for embeddings) |
 | `NOUS_TEI_URL` | — | TEI server URL (for embeddings) |
+| `NOUS_EMBED_SYNC_INTERVAL` | `30s` | Embedding sync interval |
 | `NOUS_DREAM_INTERVAL` | `6h` | Dream cycle interval |
 | `NOUS_DREAM_DISABLED` | — | Set to disable dream worker |
 
@@ -114,7 +118,8 @@ make build          # Build binary to bin/nous
 make test           # Run tests
 make docker         # Build Docker image
 make dev            # Build and run with local brain
-```
+make tidy           # Run go mod tidy
+make clean          # Clean build artifacts
 
 ## Docker
 
@@ -135,7 +140,13 @@ The image is a minimal Alpine container (~15MB) running as non-root.
 | `/health` | GET | Health check with uptime |
 | `/v1/recall?q=...` | GET | Memory recall (hybrid or keyword) |
 | `/v1/events` | GET | SSE event stream |
-
+| `/v1/chat` | POST | Workspace chat (via workspace API) |
+| `/v1/tasks` | GET/POST | Task management (via workspace API) |
+| `/v1/command` | POST | Execute workspace command |
+| `/v1/dream` | POST | Trigger dream cycle |
+| `/v1/dispatch` | POST | Cross-project dispatch |
+| `/v1/panels` | GET | Panel data (via workspace API) |
+| `/v1/health` | GET | Workspace health (via workspace API) |
 Modules register additional routes via `RegisterRoutes`.
 
 ## Using as a Library
